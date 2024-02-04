@@ -6,70 +6,9 @@ import "core:encoding/endian"
 import "core:fmt"
 import "core:io"
 import "core:os"
+import "core:slice"
 import "core:strings"
 import "oserr"
-
-ZipFile :: struct {
-    __stream: io.Stream,
-    size:     i64,
-}
-
-Header :: union {
-    LocalFile,
-    CentralDirectory,
-    EndOfCentralDirectory,
-}
-
-LocalFile :: struct {
-    signature:         u32,
-    minVersion:        u16,
-    bitFlag:           u16,
-    compressionMethod: u16,
-    lastModTime:       u16,
-    lastModDate:       u16,
-    checksum:          u32,
-    compressedSize:    u32,
-    uncompressedSize:  u32,
-    fileNameLen:       u16,
-    extraFieldLen:     u16,
-    fileName:          string,
-    extraField:        []byte,
-}
-
-CentralDirectory :: struct {
-    signature:         u32,
-    createdVersion:    u16,
-    minVersion:        u16,
-    bitFlag:           u16,
-    compressionMethod: u16,
-    lastModTime:       u16,
-    lastModDate:       u16,
-    checksum:          u32,
-    compressedSize:    u32,
-    uncompressedSize:  u32,
-    fileNameLen:       u16,
-    extraFieldLen:     u16,
-    commentLen:        u16,
-    startDisk:         u16,
-    internalAttr:      u16,
-    externalAttr:      u32,
-    offsetToLFH:       u32,
-    fileName:          string,
-    extraField:        []byte,
-    comment:           string,
-}
-
-EndOfCentralDirectory :: struct {
-    signature:    u32,
-    diskNumber:   u16,
-    cdDisk:       u16,
-    cdDiskCount:  u16,
-    cdTotalCount: u16,
-    cdSize:       u32,
-    cdOffset:     u32,
-    commentLen:   u16,
-    comment:      string,
-}
 
 open :: proc {
     open_from_file,
@@ -144,8 +83,7 @@ get_eocd :: proc(z: ^ZipFile) -> (header: EndOfCentralDirectory, err: Error) {
 
             start = end
             end = start + int(header.commentLen)
-            commentBytes := buf[start:end]
-            header.comment = strings.clone_from_bytes(commentBytes) or_return
+            header.comment = strings.clone_from(buf[start:end]) or_return
         }
         i -= 1
     }
@@ -153,6 +91,98 @@ get_eocd :: proc(z: ^ZipFile) -> (header: EndOfCentralDirectory, err: Error) {
     if header.signature != 0x06054b50 {
         err = ZipError.NoEOCDFound
     }
+    return
+}
+
+get_central_directory :: proc(z: ^ZipFile, size: u32, offset: u32) -> (header: CentralDirectory, err: Error) {
+    buf := make([]byte, size)
+    defer delete(buf)
+
+    io.seek(z.__stream, i64(offset), .Start) or_return
+    io.read_full(z.__stream, buf) or_return
+
+    start := 0
+    end := 4
+    header.signature, _ = endian.get_u32(buf[start:end], .Little)
+
+    start = end
+    end = start + 2
+    header.createdVersion, _ = endian.get_u16(buf[start:end], .Little)
+
+    start = end
+    end = start + 2
+    header.minVersion, _ = endian.get_u16(buf[start:end], .Little)
+
+    start = end
+    end = start + 2
+    header.bitFlag, _ = endian.get_u16(buf[start:end], .Little)
+
+    start = end
+    end = start + 2
+    method, _ := endian.get_u16(buf[start:end], .Little)
+    if method == 0x0008 {
+        header.compressionMethod = .Deflate
+    }
+
+    start = end
+    end = start + 2
+    header.lastModTime, _ = endian.get_u16(buf[start:end], .Little)
+
+    start = end
+    end = start + 2
+    header.lastModDate, _ = endian.get_u16(buf[start:end], .Little)
+
+    start = end
+    end = start + 4
+    header.checksum, _ = endian.get_u32(buf[start:end], .Little)
+
+    start = end
+    end = start + 4
+    header.compressedSize, _ = endian.get_u32(buf[start:end], .Little)
+
+    start = end
+    end = start + 4
+    header.uncompressedSize, _ = endian.get_u32(buf[start:end], .Little)
+
+    start = end
+    end = start + 2
+    header.fileNameLen, _ = endian.get_u16(buf[start:end], .Little)
+
+    start = end
+    end = start + 2
+    header.extraFieldLen, _ = endian.get_u16(buf[start:end], .Little)
+
+    start = end
+    end = start + 2
+    header.commentLen, _ = endian.get_u16(buf[start:end], .Little)
+
+    start = end
+    end = start + 2
+    header.startDisk, _ = endian.get_u16(buf[start:end], .Little)
+
+    start = end
+    end = start + 2
+    header.internalAttr, _ = endian.get_u16(buf[start:end], .Little)
+
+    start = end
+    end = start + 4
+    header.externalAttr, _ = endian.get_u32(buf[start:end], .Little)
+
+    start = end
+    end = start + 4
+    header.offsetToLFH, _ = endian.get_u32(buf[start:end], .Little)
+
+    start = end
+    end = start + int(header.fileNameLen)
+    header.fileName = strings.clone_from(buf[start:end]) or_return
+
+    start = end
+    end = start + int(header.extraFieldLen)
+    header.extraField = slice.clone(buf[start:end]) or_return
+
+    start = end
+    end = start + int(header.commentLen)
+    header.comment = strings.clone_from(buf[start:end]) or_return
 
     return
 }
@@ -163,10 +193,15 @@ main :: proc() {
         fmt.eprintln("Failed to open zip file:", open_err)
     }
 
-    eocd, err := get_eocd(zip)
-    if err != nil {
-        fmt.eprintln("Failed to get EOCD:", err)
+    eocd, eocd_err := get_eocd(zip)
+    if eocd_err != nil {
+        fmt.eprintln("Failed to get EOCD:", eocd_err)
     }
 
-    fmt.printf("%#v\n", eocd)
+    first, err := get_central_directory(zip, eocd.cdSize, eocd.cdOffset)
+    if err != nil {
+        fmt.eprintln("Failed to get first central directory:", err)
+    }
+
+    fmt.printf("%#v\n", first)
 }
